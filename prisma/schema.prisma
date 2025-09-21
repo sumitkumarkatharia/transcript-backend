@@ -1,0 +1,413 @@
+// prisma/schema.prisma
+generator client {
+    provider = "prisma-client-js"
+}
+
+datasource db {
+    provider = "postgresql"
+    url      = env("DATABASE_URL")
+}
+
+model User {
+    id             String        @id @default(cuid())
+    email          String        @unique
+    name           String?
+    avatar         String?
+    role           Role          @default(USER)
+    organizationId String?
+    organization   Organization? @relation(fields: [organizationId], references: [id])
+    meetings       Meeting[]
+    hostedMeetings Meeting[]     @relation("MeetingHost")
+    createdAt      DateTime      @default(now())
+    updatedAt      DateTime      @updatedAt
+
+    // Authentication
+    hashedPassword String?
+    refreshTokens  RefreshToken[]
+
+    // Settings
+    settings           UserSettings?
+    MeetingParticipant MeetingParticipant[]
+
+    @@map("users")
+}
+
+model RefreshToken {
+    id        String   @id @default(cuid())
+    token     String   @unique
+    userId    String
+    user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+    expiresAt DateTime
+    createdAt DateTime @default(now())
+
+    @@map("refresh_tokens")
+}
+
+model Organization {
+    id           String                @id @default(cuid())
+    name         String
+    domain       String?
+    settings     OrganizationSettings?
+    users        User[]
+    meetings     Meeting[]
+    integrations Integration[]
+    createdAt    DateTime              @default(now())
+    updatedAt    DateTime              @updatedAt
+
+    @@map("organizations")
+}
+
+model OrganizationSettings {
+    id             String       @id @default(cuid())
+    organizationId String       @unique
+    organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+    // Meeting settings
+    autoJoinEnabled  Boolean @default(true)
+    recordingEnabled Boolean @default(true)
+
+    // AI settings
+    aiSummaryEnabled  Boolean @default(true)
+    languageDetection Boolean @default(true)
+
+    updatedAt DateTime @updatedAt
+
+    @@map("organization_settings")
+}
+
+model Meeting {
+    id          String  @id @default(cuid())
+    title       String
+    description String?
+
+    // BigBlueButton specific
+    bbbMeetingId      String  @unique
+    bbbMeetingName    String
+    bbbRecordingId    String?
+    moderatorPassword String
+    attendeePassword  String
+    joinUrl           String?
+
+    // Meeting details
+    startTime DateTime
+    endTime   DateTime?
+    duration  Int? // in minutes
+    status    MeetingStatus @default(SCHEDULED)
+
+    // Participants
+    participants   MeetingParticipant[]
+    hostId         String
+    host           User                 @relation("MeetingHost", fields: [hostId], references: [id])
+    organizationId String
+    organization   Organization         @relation(fields: [organizationId], references: [id])
+
+    // AI Analysis
+    transcripts Transcript[]
+    summaries   MeetingSummary[]
+    actionItems ActionItem[]
+    topics      MeetingTopic[]
+    analytics   MeetingAnalytics?
+
+    // Audio & Recording
+    audioFileUrl String?
+    recordingUrl String?
+    audioChunks  AudioChunk[]
+
+    // Bot status
+    botJoined   Boolean   @default(false)
+    botJoinedAt DateTime?
+    botLeftAt   DateTime?
+
+    // Metadata
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+    User      User?    @relation(fields: [userId], references: [id])
+    userId    String?
+
+    @@map("meetings")
+}
+
+model MeetingParticipant {
+    id        String  @id @default(cuid())
+    meetingId String
+    meeting   Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+    // Participant info
+    userId    String?
+    user      User?   @relation(fields: [userId], references: [id])
+    name      String
+    email     String?
+    bbbUserId String // BigBlueButton user ID
+
+    // Participation data
+    joinTime     DateTime?
+    leaveTime    DateTime?
+    speakingTime Int? // in seconds
+    isModerator  Boolean   @default(false)
+    isMuted      Boolean   @default(false)
+    hasVideo     Boolean   @default(false)
+
+    @@unique([meetingId, bbbUserId])
+    @@map("meeting_participants")
+}
+
+model AudioChunk {
+    id        String  @id @default(cuid())
+    meetingId String
+    meeting   Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+    chunkNumber    Int
+    startTimestamp Float // in seconds
+    endTimestamp   Float // in seconds
+    audioUrl       String // S3 URL or local path
+    duration       Float // in seconds
+
+    // Processing status
+    transcribed   Boolean   @default(false)
+    transcribedAt DateTime?
+
+    createdAt DateTime @default(now())
+
+    @@unique([meetingId, chunkNumber])
+    @@index([meetingId, startTimestamp])
+    @@map("audio_chunks")
+}
+
+model Transcript {
+    id        String  @id @default(cuid())
+    meetingId String
+    meeting   Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+    // Transcript content
+    speakerId      String?
+    speakerName    String
+    content        String
+    startTimestamp Float // in seconds
+    endTimestamp   Float // in seconds
+    confidence     Float // 0-1 confidence score
+
+    // Processing metadata
+    language         String           @default("en")
+    processingStatus ProcessingStatus @default(PENDING)
+
+    // Vector embedding for semantic search
+    embedding Float[] @default([])
+
+    createdAt DateTime @default(now())
+
+    @@index([meetingId, startTimestamp])
+    @@map("transcripts")
+}
+
+model MeetingSummary {
+    id        String  @id @default(cuid())
+    meetingId String
+    meeting   Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+    type         SummaryType
+    content      String
+    keyPoints    String[]
+    participants String[]
+
+    // AI metadata
+    model       String // gpt-4, gpt-3.5-turbo
+    tokensUsed  Int
+    generatedAt DateTime @default(now())
+
+    @@map("meeting_summaries")
+}
+
+model ActionItem {
+    id        String  @id @default(cuid())
+    meetingId String
+    meeting   Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+    title           String
+    description     String?
+    assignedTo      String?
+    assignedToEmail String?
+    dueDate         DateTime?
+    priority        Priority         @default(MEDIUM)
+    status          ActionItemStatus @default(OPEN)
+
+    // Reference to transcript
+    sourceTimestamp Float?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@map("action_items")
+}
+
+model MeetingTopic {
+    id        String  @id @default(cuid())
+    meetingId String
+    meeting   Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+    name           String
+    mentions       Int      @default(1)
+    sentiment      Float? // -1 to 1
+    keywords       String[]
+    timeSpent      Int? // in seconds
+    relevanceScore Float? // 0-1
+
+    @@map("meeting_topics")
+}
+
+model MeetingAnalytics {
+    id        String  @id @default(cuid())
+    meetingId String  @unique
+    meeting   Meeting @relation(fields: [meetingId], references: [id], onDelete: Cascade)
+
+    // Speaking analytics
+    totalSpeakingTime Int // in seconds
+    participantStats  Json // speaking time per participant
+    interruptionCount Int  @default(0)
+    questionCount     Int  @default(0)
+
+    // Engagement metrics
+    overallSentiment Float? // -1 to 1
+    engagementScore  Float? // 0-1
+    energyLevel      Float? // 0-1
+
+    // Content analysis
+    topTopics       String[]
+    actionItemCount Int      @default(0)
+    decisionCount   Int      @default(0)
+
+    // Meeting quality metrics
+    talkTimeDistribution Json // How evenly distributed speaking time was
+    meetingPace          Float? // Words per minute average
+
+    generatedAt DateTime @default(now())
+
+    @@map("meeting_analytics")
+}
+
+model UserSettings {
+    id     String @id @default(cuid())
+    userId String @unique
+    user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+    // Notification preferences
+    emailSummaries     Boolean @default(true)
+    slackNotifications Boolean @default(false)
+    realTimeAlerts     Boolean @default(true)
+
+    // AI preferences
+    summaryStyle      String   @default("concise") // concise, detailed, executive
+    languages         String[] @default(["en"])
+    autoTranscription Boolean  @default(true)
+
+    // Integration settings
+    calendarSync Boolean @default(false)
+    crmSync      Boolean @default(false)
+
+    // Privacy settings
+    dataRetentionDays Int     @default(365)
+    shareAnalytics    Boolean @default(true)
+
+    updatedAt DateTime @updatedAt
+
+    @@map("user_settings")
+}
+
+model Integration {
+    id             String       @id @default(cuid())
+    organizationId String
+    organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+    type        IntegrationType
+    name        String
+    config      Json // Store integration-specific config
+    credentials Json // Encrypted credentials
+    isActive    Boolean         @default(true)
+    lastSyncAt  DateTime?
+
+    createdAt DateTime @default(now())
+    updatedAt DateTime @updatedAt
+
+    @@map("integrations")
+}
+
+model SearchIndex {
+    id        String          @id @default(cuid())
+    meetingId String
+    type      SearchIndexType
+    content   String
+    metadata  Json
+    embedding Float[]
+
+    createdAt DateTime @default(now())
+
+    @@unique([meetingId, type])
+    @@index([meetingId, type])
+    @@map("search_index")
+}
+
+// Enums
+enum Role {
+    USER
+    ADMIN
+    ORG_ADMIN
+    SUPER_ADMIN
+}
+
+enum MeetingStatus {
+    SCHEDULED
+    LIVE
+    PROCESSING
+    COMPLETED
+    CANCELLED
+    ERROR
+}
+
+enum ProcessingStatus {
+    PENDING
+    PROCESSING
+    COMPLETED
+    FAILED
+    RETRYING
+}
+
+enum SummaryType {
+    EXECUTIVE
+    DETAILED
+    ACTION_ITEMS
+    KEY_DECISIONS
+    REAL_TIME
+}
+
+enum Priority {
+    LOW
+    MEDIUM
+    HIGH
+    URGENT
+}
+
+enum ActionItemStatus {
+    OPEN
+    IN_PROGRESS
+    COMPLETED
+    CANCELLED
+    OVERDUE
+}
+
+enum IntegrationType {
+    GOOGLE_CALENDAR
+    OUTLOOK_CALENDAR
+    SLACK
+    MICROSOFT_TEAMS
+    SALESFORCE
+    HUBSPOT
+    ZOOM
+    GOOGLE_MEET
+}
+
+enum SearchIndexType {
+    TRANSCRIPT
+    SUMMARY
+    ACTION_ITEM
+    TOPIC
+    PARTICIPANT
+}
