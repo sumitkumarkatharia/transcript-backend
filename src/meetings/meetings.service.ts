@@ -5,12 +5,8 @@ import {
   BadRequestException,
   Logger,
 } from '@nestjs/common';
-import { InjectQueue } from '@nestjs/bull';
-import { Queue } from 'bull';
-
 import { PrismaService } from '../prisma/prisma.service';
 import { BigBlueButtonService } from '../bigbluebutton/bbb.service';
-import { MeetingBotService } from '../bigbluebutton/bot/meeting-bot.service';
 import { CreateMeetingDto, UpdateMeetingDto } from './dto/meeting.dto';
 import { Meeting, MeetingParticipant } from '@prisma/client';
 
@@ -38,60 +34,108 @@ export class MeetingsService {
   constructor(
     private prisma: PrismaService,
     private bbbService: BigBlueButtonService,
-    private meetingBotService: MeetingBotService,
-    @InjectQueue('meeting-processing') private meetingQueue: Queue,
   ) {}
 
   async create(
     createMeetingDto: CreateMeetingDto,
     hostId: string,
   ): Promise<Meeting> {
-    try {
-      // Generate BBB meeting details
-      const bbbMeetingId = this.bbbService.generateMeetingID();
-      const moderatorPassword = this.bbbService.generatePassword();
-      const attendeePassword = this.bbbService.generatePassword();
+    this.logger.log('=== Creating meeting ===');
+    this.logger.log(`DTO: ${JSON.stringify(createMeetingDto)}`);
+    this.logger.log(`Host ID: ${hostId}`);
 
-      // Create BBB meeting
-      const bbbMeeting = await this.bbbService.createMeeting({
-        name: createMeetingDto.title,
-        meetingID: bbbMeetingId,
-        attendeePW: attendeePassword,
-        moderatorPW: moderatorPassword,
-        welcome:
-          createMeetingDto.description ||
-          `Welcome to ${createMeetingDto.title}!`,
-        record: true,
-        autoStartRecording: true,
-        allowStartStopRecording: true,
-        duration: createMeetingDto.duration || 120,
-        maxParticipants: createMeetingDto.maxParticipants || 50,
-      });
-      if (!bbbMeeting) {
-        throw new BadRequestException('Failed to create BBB meeting');
+    try {
+      // Generate unique identifiers
+      const bbbMeetingId = this.generateMeetingID();
+      const moderatorPassword = this.generatePassword();
+      const attendeePassword = this.generatePassword();
+      let joinUrl = '';
+
+      this.logger.log(`Generated BBB ID: ${bbbMeetingId}`);
+
+      // Try to create BBB meeting (with fallback if service is unavailable)
+      try {
+        const bbbMeetingData = {
+          name: createMeetingDto.title,
+          meetingID: bbbMeetingId,
+          attendeePW: attendeePassword,
+          moderatorPW: moderatorPassword,
+          welcome:
+            createMeetingDto.description ||
+            `Welcome to ${createMeetingDto.title}!`,
+          record: true,
+          autoStartRecording: true,
+          allowStartStopRecording: true,
+          duration: createMeetingDto.duration || 120,
+          maxParticipants: createMeetingDto.maxParticipants || 50,
+        };
+
+        this.logger.log('Creating BBB meeting with data:', bbbMeetingData);
+        const bbbMeeting = await this.bbbService.createMeeting(bbbMeetingData);
+
+        if (bbbMeeting) {
+          this.logger.log('BBB meeting created successfully');
+
+          // Generate join URL
+          joinUrl = await this.bbbService.joinMeeting({
+            fullName: 'Host',
+            meetingID: bbbMeetingId,
+            password: moderatorPassword,
+          });
+          this.logger.log(`Join URL generated: ${joinUrl}`);
+        } else {
+          this.logger.warn(
+            'BBB meeting creation returned null, using fallback',
+          );
+          joinUrl = `${process.env.BBB_API_URL?.replace(
+            '/api',
+            '',
+          )}/join/${bbbMeetingId}`;
+        }
+      } catch (bbbError) {
+        this.logger.error(
+          'BBB meeting creation failed, continuing with database creation:',
+          bbbError.message,
+        );
+        joinUrl = `${
+          process.env.BBB_API_URL?.replace('/api', '') ||
+          'https://bbb.example.com'
+        }/join/${bbbMeetingId}`;
       }
-      // Generate join URL
-      const joinUrl = await this.bbbService.joinMeeting({
-        fullName: 'Host',
-        meetingID: bbbMeetingId,
-        password: moderatorPassword,
-      });
+
+      // Validate required fields before database creation
+      if (
+        !createMeetingDto.title ||
+        !createMeetingDto.organizationId ||
+        !hostId
+      ) {
+        throw new BadRequestException(
+          'Missing required fields: title, organizationId, or hostId',
+        );
+      }
 
       // Create meeting in database
+      this.logger.log('Creating meeting in database...');
       const meeting = await this.prisma.meeting.create({
         data: {
-          title: createMeetingDto.title,
-          description: createMeetingDto.description,
+          title: createMeetingDto.title.trim(),
+          description: createMeetingDto.description?.trim() || null,
           bbbMeetingId,
-          bbbMeetingName: createMeetingDto.title,
+          bbbMeetingName: createMeetingDto.title.trim(),
           moderatorPassword,
           attendeePassword,
           joinUrl,
-          startTime: createMeetingDto.startTime,
-          duration: createMeetingDto.duration,
+          startTime: new Date(createMeetingDto.startTime),
+          duration: createMeetingDto.duration || null,
           status: 'SCHEDULED',
           hostId,
           organizationId: createMeetingDto.organizationId,
+          // Required fields with defaults
+          audioFileUrl: null,
+          recordingUrl: null,
+          botJoined: false,
+          botJoinedAt: null,
+          botLeftAt: null,
         },
         include: {
           host: {
@@ -103,17 +147,29 @@ export class MeetingsService {
         },
       });
 
-      this.logger.log(`Meeting created: ${meeting.id} (BBB: ${bbbMeetingId})`);
-
-      // Schedule bot to join meeting if auto-join is enabled
-      if (createMeetingDto.autoJoinBot) {
-        await this.scheduleBot(meeting.id);
-      }
-
+      this.logger.log(
+        `Meeting created successfully: ${meeting.id} (BBB: ${bbbMeetingId})`,
+      );
       return meeting;
     } catch (error) {
-      this.logger.error('Failed to create meeting', error);
-      throw new BadRequestException('Failed to create meeting');
+      this.logger.error('Failed to create meeting:', error);
+
+      // Log detailed error information
+      if (error.code) {
+        this.logger.error(`Database error code: ${error.code}`);
+      }
+      if (error.meta) {
+        this.logger.error(`Database error meta: ${JSON.stringify(error.meta)}`);
+      }
+
+      // Throw with more specific error message
+      if (error instanceof BadRequestException) {
+        throw error;
+      }
+
+      throw new BadRequestException(
+        `Failed to create meeting: ${error.message || 'Unknown error'}`,
+      );
     }
   }
 
@@ -199,7 +255,7 @@ export class MeetingsService {
         },
         transcripts: {
           orderBy: { startTimestamp: 'asc' },
-          take: 50, // Limit for performance
+          take: 50,
         },
         summaries: {
           orderBy: { generatedAt: 'desc' },
@@ -226,7 +282,7 @@ export class MeetingsService {
       throw new NotFoundException(`Meeting with ID ${id} not found`);
     }
 
-    return meeting;
+    return meeting as MeetingWithDetails;
   }
 
   async update(
@@ -234,9 +290,7 @@ export class MeetingsService {
     updateMeetingDto: UpdateMeetingDto,
   ): Promise<Meeting> {
     const existingMeeting = await this.findOne(id);
-    if (!existingMeeting) {
-      throw new NotFoundException(`Meeting with ID ${id} not found`);
-    }
+
     try {
       const meeting = await this.prisma.meeting.update({
         where: { id },
@@ -278,18 +332,6 @@ export class MeetingsService {
         }
       }
 
-      // Remove bot if active
-      if (meeting.botJoined) {
-        try {
-          await this.meetingBotService.leaveMeeting(meeting.bbbMeetingId);
-        } catch (error) {
-          this.logger.warn(
-            'Failed to remove bot, continuing with deletion',
-            error,
-          );
-        }
-      }
-
       // Delete meeting from database
       await this.prisma.meeting.delete({
         where: { id },
@@ -310,19 +352,21 @@ export class MeetingsService {
     }
 
     try {
-      // Update meeting status
       const updatedMeeting = await this.prisma.meeting.update({
         where: { id },
         data: {
           status: 'LIVE',
           startTime: new Date(),
         },
+        include: {
+          host: {
+            select: { id: true, name: true, email: true, avatar: true },
+          },
+          organization: {
+            select: { id: true, name: true },
+          },
+        },
       });
-
-      // Start bot if auto-join is enabled
-      if (!meeting.botJoined) {
-        await this.startBot(id);
-      }
 
       this.logger.log(`Meeting started: ${id}`);
       return updatedMeeting;
@@ -340,15 +384,17 @@ export class MeetingsService {
     }
 
     try {
-      // End BBB meeting
-      await this.bbbService.endMeeting(
-        meeting.bbbMeetingId,
-        meeting.moderatorPassword,
-      );
-
-      // Stop bot
-      if (meeting.botJoined) {
-        await this.meetingBotService.leaveMeeting(meeting.bbbMeetingId);
+      // Try to end BBB meeting
+      try {
+        await this.bbbService.endMeeting(
+          meeting.bbbMeetingId,
+          meeting.moderatorPassword,
+        );
+      } catch (error) {
+        this.logger.warn(
+          'Failed to end BBB meeting, continuing with status update',
+          error,
+        );
       }
 
       // Calculate duration
@@ -356,19 +402,21 @@ export class MeetingsService {
         (new Date().getTime() - meeting.startTime.getTime()) / 60000,
       );
 
-      // Update meeting status
       const updatedMeeting = await this.prisma.meeting.update({
         where: { id },
         data: {
-          status: 'PROCESSING',
+          status: 'COMPLETED',
           endTime: new Date(),
           duration,
         },
-      });
-
-      // Queue post-meeting processing
-      await this.meetingQueue.add('process-meeting-completion', {
-        meetingId: id,
+        include: {
+          host: {
+            select: { id: true, name: true, email: true, avatar: true },
+          },
+          organization: {
+            select: { id: true, name: true },
+          },
+        },
       });
 
       this.logger.log(`Meeting ended: ${id} (Duration: ${duration} minutes)`);
@@ -383,11 +431,10 @@ export class MeetingsService {
     id: string,
     fullName: string,
     userId?: string,
-  ): Promise<string> {
+  ): Promise<{ joinUrl: string }> {
     const meeting = await this.findOne(id);
 
     try {
-      // Generate join URL
       const joinUrl = await this.bbbService.joinMeeting({
         fullName,
         meetingID: meeting.bbbMeetingId,
@@ -401,7 +448,7 @@ export class MeetingsService {
       }
 
       this.logger.log(`Join URL generated for meeting: ${id}`);
-      return joinUrl;
+      return { joinUrl };
     } catch (error) {
       this.logger.error('Failed to generate join URL', error);
       throw new BadRequestException('Failed to join meeting');
@@ -492,30 +539,6 @@ export class MeetingsService {
     });
   }
 
-  private async scheduleBot(meetingId: string): Promise<void> {
-    await this.meetingQueue.add(
-      'schedule-bot-join',
-      {
-        meetingId,
-      },
-      {
-        delay: 2 * 60 * 1000, // Join 2 minutes after meeting creation
-      },
-    );
-  }
-
-  private async startBot(meetingId: string): Promise<void> {
-    const meeting = await this.findOne(meetingId);
-
-    await this.meetingBotService.joinMeetingAsBot({
-      meetingId: meeting.bbbMeetingId,
-      botName: 'Fireflies.ai Assistant',
-      password: meeting.attendeePassword,
-      enableAudioCapture: true,
-      enableTranscription: true,
-    });
-  }
-
   async getMeetingRecordings(id: string): Promise<any[]> {
     const meeting = await this.findOne(id);
 
@@ -523,7 +546,7 @@ export class MeetingsService {
       const recordings = await this.bbbService.getRecordings(
         meeting.bbbMeetingId,
       );
-      return recordings;
+      return recordings || [];
     } catch (error) {
       this.logger.error('Failed to get meeting recordings', error);
       return [];
@@ -586,5 +609,46 @@ export class MeetingsService {
       },
       take: 20,
     });
+  }
+
+  // Helper methods
+  private generateMeetingID(): string {
+    const timestamp = Date.now().toString();
+    const randomStr = Math.random().toString(36).substr(2, 9);
+    return `meeting_${timestamp}_${randomStr}`;
+  }
+
+  private generatePassword(): string {
+    return Math.random().toString(36).substr(2, 12);
+  }
+
+  // Debug method
+  async debugBBBConnection(): Promise<any> {
+    this.logger.log('=== BBB DEBUG INFO ===');
+    this.logger.log('BBB_API_URL:', process.env.BBB_API_URL);
+    this.logger.log('BBB_SECRET_KEY set:', !!process.env.BBB_SECRET_KEY);
+
+    try {
+      // Test BBB service methods
+      const testId = this.generateMeetingID();
+      const testPassword = this.generatePassword();
+
+      this.logger.log('Test meeting ID generated:', testId);
+      this.logger.log('Test password generated:', testPassword);
+
+      return {
+        status: 'success',
+        bbb_url: process.env.BBB_API_URL,
+        secret_key_set: !!process.env.BBB_SECRET_KEY,
+        test_meeting_id: testId,
+        test_password: testPassword,
+      };
+    } catch (error) {
+      this.logger.error('BBB Debug Error:', error);
+      return {
+        status: 'error',
+        error: error.message,
+      };
+    }
   }
 }

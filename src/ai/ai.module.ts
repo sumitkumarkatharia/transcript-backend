@@ -18,6 +18,11 @@ import { OpenAIService } from './openai.service';
     SummaryService,
     AnalysisService,
   ],
-  exports: [OpenAIService, TranscriptionService, SummaryService, AnalysisService],
+  exports: [
+    OpenAIService,
+    TranscriptionService,
+    SummaryService,
+    AnalysisService,
+  ],
 })
 export class AiModule {}

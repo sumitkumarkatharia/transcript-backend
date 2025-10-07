@@ -1,4 +1,4 @@
-// src/users/users.service.ts
+// src/users/users.service.ts - EXACT FIX
 import {
   Injectable,
   NotFoundException,
@@ -23,12 +23,13 @@ export class UsersService {
   async create(
     createUserDto: CreateUserDto & { hashedPassword: string },
   ): Promise<User> {
-    const { hashedPassword, ...userData } = createUserDto;
+    // 🔧 CHANGE THIS LINE: Extract password to exclude it from userData
+    const { hashedPassword, password, ...userData } = createUserDto;
 
     try {
       const user = await this.prisma.user.create({
         data: {
-          ...userData,
+          ...userData, // This now excludes 'password' field
           hashedPassword,
           settings: {
             create: {
@@ -59,6 +60,7 @@ export class UsersService {
     }
   }
 
+  // ... rest of your methods remain exactly the same
   async findAll(organizationId?: string): Promise<User[]> {
     const where = organizationId ? { organizationId } : {};
 

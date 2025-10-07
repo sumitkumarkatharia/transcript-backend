@@ -1,4 +1,4 @@
-// src/auth/auth.service.ts
+// src/auth/auth.service.ts - UPDATE register method signature
 import {
   Injectable,
   UnauthorizedException,
@@ -13,7 +13,7 @@ import { randomBytes } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
 import { CreateUserDto } from '../users/dto/create-user.dto';
-import { LoginDto, RefreshTokenDto } from './dto/auth.dto';
+import { LoginDto, RefreshTokenDto, RegisterDto } from './dto/auth.dto'; // ADD RegisterDto
 
 export interface JwtPayload {
   sub: string;
@@ -25,6 +25,7 @@ export interface JwtPayload {
 export interface TokenPair {
   accessToken: string;
   refreshToken: string;
+  user?: any; // ADD user info to response
 }
 
 @Injectable()
@@ -55,27 +56,63 @@ export class AuthService {
     return null;
   }
 
-  async register(createUserDto: CreateUserDto): Promise<TokenPair> {
+  // UPDATE: Change signature to use RegisterDto
+  async register(registerDto: RegisterDto): Promise<TokenPair> {
     // Check if user already exists
-    const existingUser = await this.usersService.findByEmail(
-      createUserDto.email,
-    );
+    const existingUser = await this.usersService.findByEmail(registerDto.email);
     if (existingUser) {
       throw new BadRequestException('User with this email already exists');
     }
 
+    let organizationId: string | undefined;
+
+    // Create organization if organizationName is provided
+    if (registerDto.organizationName) {
+      try {
+        const organization = await this.prisma.organization.create({
+          data: {
+            name: registerDto.organizationName,
+            domain: registerDto.email.split('@')[1], // Extract domain from email
+          },
+        });
+        organizationId = organization.id;
+        this.logger.log(`Created organization: ${organization.name}`);
+      } catch (error) {
+        this.logger.error('Failed to create organization', error);
+        // Continue without organization if creation fails
+      }
+    }
+
     // Hash password
-    const hashedPassword = await bcrypt.hash(createUserDto.password, 10);
+    const hashedPassword = await bcrypt.hash(registerDto.password, 10);
 
     // Create user
     const user = await this.usersService.create({
-      ...createUserDto,
+      email: registerDto.email,
+      name: registerDto.name,
+      password: registerDto.password, // Will be ignored in favor of hashedPassword
       hashedPassword,
+      avatar: registerDto.avatar,
+      organizationId,
+      // Make them ORG_ADMIN if they created an organization
+      role: organizationId ? 'ORG_ADMIN' : 'USER',
     });
 
     this.logger.log(`New user registered: ${user.email}`);
 
-    return this.generateTokenPair(user);
+    const tokens = await this.generateTokenPair(user);
+
+    return {
+      ...tokens,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        organizationId: user.organizationId,
+        avatar: user.avatar,
+      },
+    };
   }
 
   async login(loginDto: LoginDto): Promise<TokenPair> {
@@ -87,7 +124,19 @@ export class AuthService {
 
     this.logger.log(`User logged in: ${user.email}`);
 
-    return this.generateTokenPair(user);
+    const tokens = await this.generateTokenPair(user);
+
+    return {
+      ...tokens,
+      user: {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        organizationId: user.organizationId,
+        avatar: user.avatar,
+      },
+    };
   }
 
   async refreshToken(refreshTokenDto: RefreshTokenDto): Promise<TokenPair> {

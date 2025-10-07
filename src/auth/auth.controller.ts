@@ -1,4 +1,4 @@
-// src/auth/auth.controller.ts
+// src/auth/auth.controller.ts - UPDATE to use RegisterDto
 import {
   Controller,
   Post,
@@ -17,9 +17,10 @@ import {
 } from '@nestjs/swagger';
 
 import { AuthService } from './auth.service';
-import { CreateUserDto } from '../users/dto/create-user.dto';
+// CHANGE THIS: Import RegisterDto instead of CreateUserDto
 import {
   LoginDto,
+  RegisterDto, // NEW: Use RegisterDto
   RefreshTokenDto,
   ChangePasswordDto,
   ResetPasswordDto,
@@ -37,11 +38,12 @@ export class AuthController {
   @ApiOperation({ summary: 'Register a new user' })
   @ApiResponse({ status: 201, description: 'User successfully registered' })
   @ApiResponse({ status: 400, description: 'Bad request' })
-  async register(@Body() createUserDto: CreateUserDto) {
-    const tokens = await this.authService.register(createUserDto);
+  async register(@Body() registerDto: RegisterDto) {
+    // CHANGE: Use RegisterDto
+    const result = await this.authService.register(registerDto);
     return {
       message: 'User successfully registered',
-      ...tokens,
+      ...result,
     };
   }
 

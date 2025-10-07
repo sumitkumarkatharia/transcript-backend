@@ -7,6 +7,7 @@ import { MeetingsController } from './meetings.controller';
 import { MeetingsGateway } from './meetings.gateway';
 import { BigBlueButtonModule } from '../bigbluebutton/bbb.module';
 import { AiModule } from '../ai/ai.module';
+import { PrismaModule } from '../prisma/prisma.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { AiModule } from '../ai/ai.module';
     }),
     BigBlueButtonModule,
     AiModule,
+    PrismaModule, // ✅ Correct
   ],
   providers: [MeetingsService, MeetingsGateway],
   controllers: [MeetingsController],

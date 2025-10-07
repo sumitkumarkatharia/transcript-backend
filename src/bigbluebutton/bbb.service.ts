@@ -116,10 +116,15 @@ export class BigBlueButtonService {
     try {
       const response = await this.makeAPICall('create', params);
 
-      if (response.returncode !== 'SUCCESS') {
-        throw new BadRequestException(
-          `Failed to create meeting: ${response.message}`,
-        );
+      const returncode = this.extractValue(response.returncode);
+      console.log('BBB Create Response - Return Code:', returncode);
+
+      if (returncode !== 'SUCCESS') {
+        const message =
+          this.extractValue(response.message) ||
+          this.extractValue(response.messageKey) ||
+          'Unknown error';
+        throw new BadRequestException(`Failed to create meeting: ${message}`);
       }
 
       this.logger.log(
@@ -127,12 +132,12 @@ export class BigBlueButtonService {
       );
 
       return {
-        meetingID: response.meetingID,
-        meetingName: response.meetingName,
-        createTime: response.createTime,
-        voiceBridge: response.voiceBridge,
-        attendeePW: response.attendeePW,
-        moderatorPW: response.moderatorPW,
+        meetingID: this.extractValue(response.meetingID),
+        meetingName: this.extractValue(response.meetingName),
+        createTime: this.extractValue(response.createTime),
+        voiceBridge: this.extractValue(response.voiceBridge),
+        attendeePW: this.extractValue(response.attendeePW),
+        moderatorPW: this.extractValue(response.moderatorPW),
         running: false,
         participantCount: 0,
         moderatorCount: 0,
@@ -283,8 +288,8 @@ export class BigBlueButtonService {
         playback: Array.isArray(r.playback?.format)
           ? r.playback.format
           : r.playback?.format
-            ? [r.playback.format]
-            : [],
+          ? [r.playback.format]
+          : [],
       }));
     } catch (error) {
       this.logger.error('Failed to get BBB recordings', error);
@@ -337,21 +342,55 @@ export class BigBlueButtonService {
     }
   }
 
+  // Updated makeAPICall with array extraction helper
   private async makeAPICall(
     endpoint: string,
     params: URLSearchParams,
   ): Promise<any> {
     const apiCall = this.buildAPICall(endpoint, params);
 
-    const response = await fetch(apiCall);
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+    console.log('BBB API Call URL:', apiCall);
+
+    try {
+      const response = await fetch(apiCall);
+
+      console.log('BBB Response Status:', response.status);
+      console.log('BBB Response OK:', response.ok);
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const xmlData = await response.text();
+      console.log('BBB Raw XML Response:', xmlData);
+
+      // Fix: parseXML only takes one argument (the XML string)
+      const result = (await parseXML(xmlData)) as any;
+
+      console.log('BBB Parsed Response:', JSON.stringify(result, null, 2));
+
+      // Fix: Type the result properly and handle the response structure
+      const responseData = (result as any)?.response || result;
+      console.log('BBB Response Data:', JSON.stringify(responseData, null, 2));
+
+      return responseData;
+    } catch (error) {
+      console.error('BBB API Call Error:', {
+        endpoint,
+        url: apiCall,
+        error: error.message,
+        stack: error.stack,
+      });
+      throw error;
     }
+  }
 
-    const xmlData = await response.text();
-    const result = await parseXML(xmlData);
-
-    return result;
+  // Helper function to extract values from XML array format
+  private extractValue(value: any): string {
+    if (Array.isArray(value)) {
+      return value[0] || '';
+    }
+    return value || '';
   }
 
   private buildAPICall(endpoint: string, params: URLSearchParams): string {
@@ -368,5 +407,46 @@ export class BigBlueButtonService {
 
   generatePassword(): string {
     return Math.random().toString(36).substr(2, 10);
+  }
+
+  // New test method with fixed TypeScript
+  async testBBBConnection(): Promise<any> {
+    console.log('=== Testing BBB Connection ===');
+    console.log('BBB API URL:', this.apiUrl);
+    console.log('BBB Secret Key exists:', !!this.secretKey);
+
+    try {
+      // Test with getMeetings call which is simpler
+      const params = new URLSearchParams();
+      const apiCall = this.buildAPICall('getMeetings', params);
+
+      console.log('Test API Call:', apiCall);
+
+      const response = await fetch(apiCall);
+      const xmlData = await response.text();
+
+      console.log('Test Response Status:', response.status);
+      console.log('Test Response XML:', xmlData);
+
+      // Fix: parseXML only takes one argument
+      const result = (await parseXML(xmlData)) as any;
+
+      console.log('Test Parsed Result:', JSON.stringify(result, null, 2));
+
+      return {
+        status: 'success',
+        apiUrl: this.apiUrl,
+        secretKeyExists: !!this.secretKey,
+        response: result,
+      };
+    } catch (error) {
+      console.error('BBB Connection Test Failed:', error);
+      return {
+        status: 'error',
+        error: error.message,
+        apiUrl: this.apiUrl,
+        secretKeyExists: !!this.secretKey,
+      };
+    }
   }
 }
